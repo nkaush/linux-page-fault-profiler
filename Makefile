@@ -25,3 +25,21 @@ clean:
 	rm -f monitor work *~ *.ko *.o *.mod.c Module.symvers modules.order
 
 
+wipe: clean
+	find . -name "*.cmd" -delete
+	find . -name "*.mod" -delete
+	find . -name "*.order" -delete
+
+ul: unload load 
+
+logs:
+	sudo dmesg | grep "MP3"
+
+slab_logs: 
+	sudo cat /proc/slabinfo | head -n 10
+
+load:
+	sudo insmod mp3.ko
+
+unload: 
+	sudo rmmod mp3.ko
