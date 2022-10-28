@@ -43,3 +43,6 @@ load:
 
 unload: 
 	sudo rmmod mp3.ko
+
+read:
+	cat /proc/mp3/status
