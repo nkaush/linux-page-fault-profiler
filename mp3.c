@@ -6,10 +6,13 @@
 
 #include <linux/workqueue.h>
 #include <linux/proc_fs.h>
+#include <linux/vmalloc.h>
 #include <linux/timer.h>
 #include <linux/types.h>
+#include <linux/cdev.h>
 #include <linux/list.h>
 #include <linux/slab.h>
+#include <linux/fs.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Neil Kaushikkar");
@@ -19,6 +22,16 @@ MODULE_DESCRIPTION("CS-423 MP3");
 #define FILENAME "status"
 #define DIRECTORY "mp3"
 #define PREFIX "[MP3] "
+#define CHR_DEV_NAME "mp3-chr-dev"
+#define MP3_WQ_NAME "mp3-worker"
+
+#define BUFFER_PAGE_SIZE 4096
+#define BUFFER_NUM_PAGES 128
+#define BUFFER_SIZE (BUFFER_PAGE_SIZE * BUFFER_NUM_PAGES)
+#define METRIC_COLLECTION_INTERVAL 50
+#define CHR_DEV_MAJOR_DEV_NUM 423
+#define CHR_DEV_MINOR_DEV_NUM 0
+#define CHR_DEV_COUNT 1
 #define BASE10 10
 
 #define LOG(fmt)                                            \
@@ -41,15 +54,34 @@ static DEFINE_SPINLOCK(rp_lock);
 
 // This list keeps track of all the processes to schedule
 static struct list_head task_list_head = LIST_HEAD_INIT(task_list_head);
+static size_t task_list_size = 0;
 
 // A slab allocator cache to speed up allocation of the extended task_structs
 static struct kmem_cache *mp3_pcb_cache;
+
+static struct cdev mp3_cdev;
+static dev_t mp3_cdev_id;
+static void *memory_buffer;
+
+static int mp3_cdev_open_callback(struct inode *inode, struct file *file);
+static int mp3_cdev_mmap_callback(struct file *file, struct vm_area_struct *vm_area);
+static int mp3_cdev_release_callback(struct inode *inode, struct file *filp);
+
+struct file_operations mp3_cdev_fops = {
+    .owner   = THIS_MODULE,
+    .open    = mp3_cdev_open_callback,
+    .mmap    = mp3_cdev_mmap_callback,
+    .release = mp3_cdev_release_callback
+};
+
+static void collect_page_faults(struct work_struct *work);
+static DECLARE_DELAYED_WORK(metric_collection_work, collect_page_faults);
+static struct workqueue_struct *workqueue;
 
 // This proc entry represents the directory mp3 in the procfs 
 static struct proc_dir_entry *proc_dir;
 
 static ssize_t mp3_proc_read_callback(struct file *file, char __user *buffer, size_t count, loff_t *off);
-
 static ssize_t mp3_proc_write_callback(struct file *file, const char __user *buffer, size_t count, loff_t *off);
 
 // This struct contains callbacks for operations on our procfs entry.
@@ -72,13 +104,13 @@ static struct mp3_pcb * find_mp3_pcb_by_pid(pid_t pid) {
 
 static ssize_t mp3_proc_read_callback(struct file *file, char __user *buffer, size_t count, loff_t *off) {
     struct mp3_pcb *entry;
-    size_t to_copy = 0;
+    size_t to_copy = 0, lock_flags = 0;
     ssize_t copied = 0;
 
     char *kernel_buf = (char *) kzalloc(count, GFP_KERNEL);
    
     // Go through each entry of the list and read + format the pid and cpu use
-    spin_lock(&rp_lock);
+    spin_lock_irqsave(&rp_lock, lock_flags);
     list_for_each_entry(entry, &task_list_head, list) {
         // if we have written more than can be copied to the user buffer, stop
         if (to_copy >= count) { break; }
@@ -86,7 +118,7 @@ static ssize_t mp3_proc_read_callback(struct file *file, char __user *buffer, si
         to_copy += 
             snprintf(kernel_buf + to_copy, count - to_copy, "%d\n", entry->pid);
     }
-    spin_unlock(&rp_lock);
+    spin_unlock_irqrestore(&rp_lock, lock_flags);
 
     copied += simple_read_from_buffer(buffer, count, off, kernel_buf, to_copy);
     kfree(kernel_buf);
@@ -96,7 +128,7 @@ static ssize_t mp3_proc_read_callback(struct file *file, char __user *buffer, si
 
 static ssize_t mp3_proc_write_callback(struct file *file, const char __user *buffer, size_t count, loff_t *off) {    
     ssize_t copied = 0;
-    size_t kernel_buf_size = count + 1;
+    size_t kernel_buf_size = count + 1, lock_flags = 0;
     char *kernel_buf = (char *) kzalloc(kernel_buf_size, GFP_KERNEL);
     struct task_struct *pid_task = NULL;
     struct mp3_pcb *pcb = NULL;
@@ -129,21 +161,30 @@ static ssize_t mp3_proc_write_callback(struct file *file, const char __user *buf
         pcb->linux_task = pid_task;
         pcb->pid = pid;
 
-        spin_lock(&rp_lock);
+        spin_lock_irqsave(&rp_lock, lock_flags);
         list_add(&pcb->list, task_list_head.next);
-        spin_unlock(&rp_lock);
+        ++task_list_size;
+
+        if ( task_list_size == 1 ) {
+            queue_delayed_work(workqueue, &metric_collection_work, msecs_to_jiffies(METRIC_COLLECTION_INTERVAL));
+        }
+        spin_unlock_irqrestore(&rp_lock, lock_flags);
     } else if ( command == 'U' ) { // TRY TO DE-REGISTER PROCESS
         FMT("Attempting to deregister pid %d\n", pid);
 
-        spin_lock(&rp_lock);
+        spin_lock_irqsave(&rp_lock, lock_flags);
         pcb = find_mp3_pcb_by_pid(pid);
         if ( pcb ) {
             list_del(&pcb->list);
+            --task_list_size;
             FMT("Deregister pid %d\n", pid);
+            if ( task_list_size == 0 ) {
+                cancel_delayed_work(&metric_collection_work);
+            }
         } else {
             FMT("Unable to deregister pid %d\n", pid);
         }
-        spin_unlock(&rp_lock);
+        spin_unlock_irqrestore(&rp_lock, lock_flags);
 
         kmem_cache_free(mp3_pcb_cache, pcb);
     }
@@ -152,29 +193,70 @@ static ssize_t mp3_proc_write_callback(struct file *file, const char __user *buf
     return copied;
 }
 
+static void collect_page_faults(struct work_struct* work) {
+    size_t min_flt, maj_flt, utime, stime, total_min_flt, total_maj_flt, total_time;
+    struct mp3_pcb *pcb, *tmp;
+    size_t lock_flags = 0;
+
+    spin_lock_irqsave(&rp_lock, lock_flags);
+    list_for_each_entry_safe(pcb, tmp, &task_list_head, list) {
+        if ( get_cpu_use(pcb->pid, &min_flt, &maj_flt, &utime, &stime) == -1 ) {
+            list_del(&pcb->list);
+        } else {
+            total_min_flt += min_flt;
+            total_maj_flt += maj_flt;
+            total_time += utime + stime;
+        }
+    };
+    spin_unlock_irqrestore(&rp_lock, lock_flags);
+
+    // TODO write to buffer...
+}
+
+static int mp3_cdev_open_callback(struct inode *inode, struct file *file) {
+
+}
+
+static int mp3_cdev_mmap_callback(struct file *file, struct vm_area_struct *vm_area) {
+
+}
+
+static int mp3_cdev_release_callback(struct inode *inode, struct file *filp) {
+    
+}
+
 // mp1_init - Called when module is loaded
 int __init mp3_init(void) {
-    struct mp3_pcb *entry, *tmp;
+    size_t i;
+    int s;
 
     #ifdef DEBUG
     printk(KERN_ALERT "MP3 MODULE LOADING\n");
     #endif
 
+    workqueue = create_singlethread_workqueue(MP3_WQ_NAME);
+
     // Setup proc fs entry
     proc_dir = proc_mkdir(DIRECTORY, NULL);
     proc_create(FILENAME, 0666, proc_dir, &mp3_file_ops);
 
-    LOG("Removing LL nodes\n");
-    spin_lock(&rp_lock);
-    list_for_each_entry_safe(entry, tmp, &task_list_head, list) {
-        FMT("removing process with pid %d\n", entry->pid);
-        list_del(&entry->list);
-        kmem_cache_free(mp3_pcb_cache, entry);
-    };
-    spin_unlock(&rp_lock);
-
     // Set up SLAB allocator cache
     mp3_pcb_cache = KMEM_CACHE(mp3_pcb, SLAB_PANIC);
+
+    memory_buffer = vzalloc(BUFFER_SIZE);
+    for(i = 0; i < BUFFER_NUM_PAGES * BUFFER_PAGE_SIZE; i += BUFFER_PAGE_SIZE) {
+        SetPageReserved(virt_to_page(((unsigned long) memory_buffer) + i));
+    }
+
+    mp3_cdev_id = MKDEV(CHR_DEV_MAJOR_DEV_NUM, CHR_DEV_MINOR_DEV_NUM);
+    s = register_chrdev_region(mp3_cdev_id, CHR_DEV_COUNT, CHR_DEV_NAME);
+    if ( s ) {
+        FMT("register_chrdev_region returned status %d", s);
+        return 1;
+    }
+
+    cdev_init(&mp3_cdev, &mp3_cdev_fops);
+    cdev_add(&mp3_cdev, mp3_cdev_id, CHR_DEV_COUNT);
 
     printk(KERN_ALERT "MP3 MODULE LOADED\n");
     return 0;   
@@ -182,17 +264,51 @@ int __init mp3_init(void) {
 
 // mp1_exit - Called when module is unloaded
 void __exit mp3_exit(void) {
+    struct mp3_pcb *entry, *tmp;
+    size_t lock_flags = 0, i;
+
     #ifdef DEBUG
     printk(KERN_ALERT "MP3 MODULE UNLOADING\n");
     #endif
     
+    // Remove proc fs entry
     LOG("Removing proc fs entry");
     remove_proc_entry(FILENAME, proc_dir);
     remove_proc_entry(DIRECTORY, NULL);
 
+    // Remove kmem cache
     LOG("Removing kmem cache");
     kmem_cache_destroy(mp3_pcb_cache);
 
+    // Clear workqueue
+    if ( workqueue ) {
+        cancel_delayed_work(&metric_collection_work);
+        flush_workqueue(workqueue);
+        destroy_workqueue(workqueue);
+    }
+
+    // delete ll nodes
+    LOG("Removing LL nodes");
+    spin_lock_irqsave(&rp_lock, lock_flags);
+    list_for_each_entry_safe(entry, tmp, &task_list_head, list) {
+        FMT("removing process with pid %d\n", entry->pid);
+        list_del(&entry->list);
+        kmem_cache_free(mp3_pcb_cache, entry);
+    };
+    spin_unlock_irqrestore(&rp_lock, lock_flags);
+
+    // Free up virtual memory space
+    LOG("Free virtual memory");
+    for(i = 0; i < BUFFER_NUM_PAGES * BUFFER_PAGE_SIZE; i += BUFFER_PAGE_SIZE) {
+        ClearPageReserved(virt_to_page(((unsigned long) memory_buffer) + i));
+    }
+    vfree(memory_buffer);
+
+    // Unregister character device
+    LOG("Unregister character device");
+    cdev_del(&mp3_cdev);
+    unregister_chrdev_region(mp3_cdev_id, CHR_DEV_COUNT);
+    
     printk(KERN_ALERT "MP3 MODULE UNLOADED\n");
 }
 
