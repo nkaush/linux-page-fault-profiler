@@ -22,7 +22,7 @@ MODULE_DESCRIPTION("CS-423 MP3");
 #define FILENAME "status"
 #define DIRECTORY "mp3"
 #define PREFIX "[MP3] "
-#define CHR_DEV_NAME "mp3-chr-dev"
+#define CHR_DEV_NAME "node"
 #define MP3_WQ_NAME "mp3-worker"
 
 #define BUFFER_PAGE_SIZE 4096
@@ -63,11 +63,17 @@ static struct cdev mp3_cdev;
 static dev_t mp3_cdev_id;
 static void *memory_buffer;
 
+static int mp3_cdev_fault_callback(struct vm_area_struct *vma, struct vm_fault *vmf);
+
+static const struct vm_operations_struct mp3_vm_ops = {
+    .fault = mp3_cdev_fault_callback
+};
+
 static int mp3_cdev_open_callback(struct inode *inode, struct file *file);
 static int mp3_cdev_mmap_callback(struct file *file, struct vm_area_struct *vm_area);
 static int mp3_cdev_release_callback(struct inode *inode, struct file *filp);
 
-struct file_operations mp3_cdev_fops = {
+static const struct file_operations mp3_cdev_fops = {
     .owner   = THIS_MODULE,
     .open    = mp3_cdev_open_callback,
     .mmap    = mp3_cdev_mmap_callback,
@@ -213,16 +219,27 @@ static void collect_page_faults(struct work_struct* work) {
     // TODO write to buffer...
 }
 
-static int mp3_cdev_open_callback(struct inode *inode, struct file *file) {
+static int mp3_cdev_fault_callback(struct vm_area_struct *vma, struct vm_fault *vmf) {
+    // vmf->page = my_page_at_index(vmf->pgoff);
+    // get_page(vmf->page);
 
+    return 0;
+}
+
+static int mp3_cdev_open_callback(struct inode *inode, struct file *file) {
+    LOG("Character device opened!")
+    return 0; 
 }
 
 static int mp3_cdev_mmap_callback(struct file *file, struct vm_area_struct *vm_area) {
-
+    LOG("Character device mmaped!")
+    vma->vm_ops = &mp3_vm_ops;
+    return 0;
 }
 
 static int mp3_cdev_release_callback(struct inode *inode, struct file *filp) {
-    
+    LOG("Character device released!")
+    return 0;
 }
 
 // mp1_init - Called when module is loaded
