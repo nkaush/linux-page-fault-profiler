@@ -13,6 +13,7 @@
 #include <linux/list.h>
 #include <linux/slab.h>
 #include <linux/fs.h>
+#include <linux/mm.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Neil Kaushikkar");
@@ -22,12 +23,14 @@ MODULE_DESCRIPTION("CS-423 MP3");
 #define FILENAME "status"
 #define DIRECTORY "mp3"
 #define PREFIX "[MP3] "
-#define CHR_DEV_NAME "node"
+#define CHR_DEV_NAME "mp3-chr-dev"
 #define MP3_WQ_NAME "mp3-worker"
 
 #define BUFFER_PAGE_SIZE 4096
 #define BUFFER_NUM_PAGES 128
 #define BUFFER_SIZE (BUFFER_PAGE_SIZE * BUFFER_NUM_PAGES)
+#define BUFFER_SAMPLE_SIZE (4 * sizeof(unsigned long))
+#define BUFFER_MAX_SAMPLES (BUFFER_SIZE / BUFFER_SAMPLE_SIZE)
 #define METRIC_COLLECTION_INTERVAL 50
 #define CHR_DEV_MAJOR_DEV_NUM 423
 #define CHR_DEV_MINOR_DEV_NUM 0
@@ -62,10 +65,11 @@ static struct kmem_cache *mp3_pcb_cache;
 static struct cdev mp3_cdev;
 static dev_t mp3_cdev_id;
 static void *memory_buffer;
+static size_t num_samples = 0;
 
-static int mp3_cdev_fault_callback(struct vm_area_struct *vma, struct vm_fault *vmf);
+static vm_fault_t mp3_cdev_fault_callback(struct vm_fault *vmf);
 
-static const struct vm_operations_struct mp3_vm_ops = {
+static const struct vm_operations_struct mp3_vm_ops = { 
     .fault = mp3_cdev_fault_callback
 };
 
@@ -185,7 +189,7 @@ static ssize_t mp3_proc_write_callback(struct file *file, const char __user *buf
             --task_list_size;
             FMT("Deregister pid %d\n", pid);
             if ( task_list_size == 0 ) {
-                cancel_delayed_work(&metric_collection_work);
+                cancel_delayed_work_sync(&metric_collection_work);
             }
         } else {
             FMT("Unable to deregister pid %d\n", pid);
@@ -201,8 +205,10 @@ static ssize_t mp3_proc_write_callback(struct file *file, const char __user *buf
 
 static void collect_page_faults(struct work_struct* work) {
     size_t min_flt, maj_flt, utime, stime, total_min_flt, total_maj_flt, total_time;
+    size_t lock_flags = 0, sample_index = num_samples % BUFFER_MAX_SAMPLES;
+    void *sample_start_address = memory_buffer + (sample_index * BUFFER_SAMPLE_SIZE);
     struct mp3_pcb *pcb, *tmp;
-    size_t lock_flags = 0;
+    size_t current_jiffies = jiffies;
 
     spin_lock_irqsave(&rp_lock, lock_flags);
     list_for_each_entry_safe(pcb, tmp, &task_list_head, list) {
@@ -217,11 +223,24 @@ static void collect_page_faults(struct work_struct* work) {
     spin_unlock_irqrestore(&rp_lock, lock_flags);
 
     // TODO write to buffer...
+    memcpy(sample_start_address, &current_jiffies, sizeof(size_t));
+    sample_start_address += sizeof(size_t);
+    memcpy(sample_start_address, &total_min_flt, sizeof(size_t));
+    sample_start_address += sizeof(size_t);
+    memcpy(sample_start_address, &total_maj_flt, sizeof(size_t));
+    sample_start_address += sizeof(size_t);
+    memcpy(sample_start_address, &total_time, sizeof(size_t));
 }
 
-static int mp3_cdev_fault_callback(struct vm_area_struct *vma, struct vm_fault *vmf) {
-    // vmf->page = my_page_at_index(vmf->pgoff);
-    // get_page(vmf->page);
+static vm_fault_t mp3_cdev_fault_callback(struct vm_fault *vmf) {
+    struct vm_area_struct *vma = vmf->vma;
+    size_t pfn, size = BUFFER_PAGE_SIZE;
+    int ret;
+
+    FMT("fault handler: pgoff: %zu + buffer: %p --> %p", vmf->pgoff, memory_buffer, memory_buffer + (vmf->pgoff << PAGE_SHIFT))
+
+    pfn = vmalloc_to_pfn(memory_buffer + (vmf->pgoff << PAGE_SHIFT));
+    ret = remap_pfn_range(vma, vma->vm_start, pfn, size, vma->vm_page_prot);
 
     return 0;
 }
@@ -231,9 +250,12 @@ static int mp3_cdev_open_callback(struct inode *inode, struct file *file) {
     return 0; 
 }
 
-static int mp3_cdev_mmap_callback(struct file *file, struct vm_area_struct *vm_area) {
-    LOG("Character device mmaped!")
+static int mp3_cdev_mmap_callback(struct file *file, struct vm_area_struct *vma) {
+    FMT("Character device mmaped: start: %p --> end: %p", memory_buffer, memory_buffer + BUFFER_SIZE)
     vma->vm_ops = &mp3_vm_ops;
+    vma->vm_start = (long unsigned int) memory_buffer;
+    vma->vm_end = (long unsigned int) memory_buffer + BUFFER_SIZE;
+    
     return 0;
 }
 
@@ -261,22 +283,25 @@ int __init mp3_init(void) {
     mp3_pcb_cache = KMEM_CACHE(mp3_pcb, SLAB_PANIC);
 
     memory_buffer = vzalloc(BUFFER_SIZE);
+    memset(memory_buffer, 0xff, BUFFER_SIZE);
     for(i = 0; i < BUFFER_NUM_PAGES * BUFFER_PAGE_SIZE; i += BUFFER_PAGE_SIZE) {
-        SetPageReserved(virt_to_page(((unsigned long) memory_buffer) + i));
+        SetPageReserved(vmalloc_to_page(vmalloc_to_page(memory_buffer + i)));
     }
 
     mp3_cdev_id = MKDEV(CHR_DEV_MAJOR_DEV_NUM, CHR_DEV_MINOR_DEV_NUM);
     s = register_chrdev_region(mp3_cdev_id, CHR_DEV_COUNT, CHR_DEV_NAME);
+    FMT("register_chrdev_region returned %d", s)
     if ( s ) {
         FMT("register_chrdev_region returned status %d", s);
         return 1;
     }
 
     cdev_init(&mp3_cdev, &mp3_cdev_fops);
-    cdev_add(&mp3_cdev, mp3_cdev_id, CHR_DEV_COUNT);
+    s = cdev_add(&mp3_cdev, mp3_cdev_id, CHR_DEV_COUNT);
+    FMT("cdev_add returned %d", s)
 
     printk(KERN_ALERT "MP3 MODULE LOADED\n");
-    return 0;   
+    return 0;
 }
 
 // mp1_exit - Called when module is unloaded
@@ -299,8 +324,7 @@ void __exit mp3_exit(void) {
 
     // Clear workqueue
     if ( workqueue ) {
-        cancel_delayed_work(&metric_collection_work);
-        flush_workqueue(workqueue);
+        cancel_delayed_work_sync(&metric_collection_work);
         destroy_workqueue(workqueue);
     }
 
@@ -317,7 +341,7 @@ void __exit mp3_exit(void) {
     // Free up virtual memory space
     LOG("Free virtual memory");
     for(i = 0; i < BUFFER_NUM_PAGES * BUFFER_PAGE_SIZE; i += BUFFER_PAGE_SIZE) {
-        ClearPageReserved(virt_to_page(((unsigned long) memory_buffer) + i));
+        ClearPageReserved(vmalloc_to_page(memory_buffer + i));
     }
     vfree(memory_buffer);
 
