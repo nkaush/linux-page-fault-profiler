@@ -52,10 +52,7 @@ struct mp3_pcb {
 };
 
 struct mp3_sample {
-    size_t a;
-    size_t b;
-    size_t c;
-    size_t d;
+    size_t data[4];
 };
 
 #define BUFFER_SAMPLE_SIZE sizeof(struct mp3_sample)
@@ -75,12 +72,10 @@ static dev_t mp3_cdev_id;
 static struct mp3_sample *memory_buffer;
 static size_t num_samples = 0;
 
-static struct page * mp3_cdev_nopage_callback(struct vm_area_struct *vma, unsigned long address, int write_access);
 static vm_fault_t mp3_cdev_fault_callback(struct vm_fault *vmf);
 
 static const struct vm_operations_struct mp3_vm_ops = { 
-    // .fault = mp3_cdev_fault_callback,
-    .nopage = mp3_cdev_nopage_callback
+    .fault = mp3_cdev_fault_callback
 };
 
 static int mp3_cdev_open_callback(struct inode *inode, struct file *file);
@@ -186,11 +181,12 @@ static ssize_t mp3_proc_write_callback(struct file *file, const char __user *buf
         ++task_list_size;
 
         if ( task_list_size == 1 ) {
+            FMT("delay is %zu jiffies", msecs_to_jiffies(METRIC_COLLECTION_INTERVAL))
             queue_delayed_work(workqueue, &metric_collection_work, msecs_to_jiffies(METRIC_COLLECTION_INTERVAL));
         }
         spin_unlock_irqrestore(&rp_lock, lock_flags);
     } else if ( command == 'U' ) { // TRY TO DE-REGISTER PROCESS
-        FMT("Attempting to deregister pid %d\n", pid);
+        FMT("Attempting to deregister pid %d", pid);
 
         spin_lock_irqsave(&rp_lock, lock_flags);
         pcb = find_mp3_pcb_by_pid(pid);
@@ -214,10 +210,19 @@ static ssize_t mp3_proc_write_callback(struct file *file, const char __user *buf
 }
 
 static void collect_page_faults(struct work_struct* work) {
-    size_t min_flt, maj_flt, utime, stime, total_min_flt, total_maj_flt, total_time;
-    struct mp3_sample *sample = memory_buffer + num_samples;
+    size_t min_flt, maj_flt, utime, stime, total_min_flt = 0, total_maj_flt = 0, total_time = 0;
     size_t current_jiffies = jiffies, lock_flags = 0;
     struct mp3_pcb *pcb, *tmp;
+    struct mp3_sample *sample;
+
+    if ( num_samples == BUFFER_MAX_SAMPLES ) {
+        FMT("memmove(%p, %p, %zu)", memory_buffer, memory_buffer + 1, BUFFER_SIZE - BUFFER_SAMPLE_SIZE)
+        memmove(memory_buffer, memory_buffer + 1, BUFFER_SIZE - BUFFER_SAMPLE_SIZE);
+        sample = memory_buffer + num_samples - 1;
+    } else {
+        sample = memory_buffer + num_samples;
+        ++num_samples;
+    }
 
     spin_lock_irqsave(&rp_lock, lock_flags);
     list_for_each_entry_safe(pcb, tmp, &task_list_head, list) {
@@ -231,37 +236,22 @@ static void collect_page_faults(struct work_struct* work) {
     };
     spin_unlock_irqrestore(&rp_lock, lock_flags);
 
-    // TODO write to buffer...
-    sample->a = current_jiffies;
-    sample->b = total_min_flt;
-    sample->c = total_maj_flt;
-    sample->d = total_time;
+    FMT("%zu, %zu, %zu, %zu (num_samples %zu/%zu)", current_jiffies, total_min_flt, total_maj_flt, total_time, num_samples, BUFFER_MAX_SAMPLES);
+    sample->data[0] = current_jiffies;
+    sample->data[1] = total_min_flt;
+    sample->data[2] = total_maj_flt;
+    sample->data[3] = total_time;
     
-    ++num_samples;
+    queue_delayed_work(workqueue, &metric_collection_work, msecs_to_jiffies(METRIC_COLLECTION_INTERVAL));
 }
 
 static vm_fault_t mp3_cdev_fault_callback(struct vm_fault *vmf) {
-    struct vm_area_struct *vma = vmf->vma;
-    size_t pfn, size = BUFFER_PAGE_SIZE;
-    int ret;
-
     FMT("fault handler: pgoff: %zu + buffer: %p --> %p", vmf->pgoff, memory_buffer, memory_buffer + (vmf->pgoff << PAGE_SHIFT))
 
-    pfn = vmalloc_to_pfn(memory_buffer + (vmf->pgoff << PAGE_SHIFT));
-    ret = remap_pfn_range(vma, vma->vm_start, pfn, size, vma->vm_page_prot);
+    vmf->page = vmalloc_to_page(((void*)memory_buffer) + (vmf->pgoff << PAGE_SHIFT));
+    get_page(vmf->page);
 
     return 0;
-}
-
-static struct page * mp3_cdev_nopage_callback(struct vm_area_struct *vma, unsigned long address, int write_access) {
-    struct page *pageptr;
-
-    unsigned long physaddr = address - vma->vm_start + VMA_OFFSET(vma);
-    FMT("mp3_cdev_nopage_callback: address: %zu, physaddress: %zu", address, physaddr);
-
-    pageptr = vmalloc_to_page((void*) physaddr);
-    get_page(pageptr);
-    return pageptr;
 }
 
 static int mp3_cdev_open_callback(struct inode *inode, struct file *file) {
@@ -272,8 +262,6 @@ static int mp3_cdev_open_callback(struct inode *inode, struct file *file) {
 static int mp3_cdev_mmap_callback(struct file *file, struct vm_area_struct *vma) {
     FMT("Character device mmaped: start: %p --> end: %p", memory_buffer, memory_buffer + BUFFER_SIZE)
     vma->vm_ops = &mp3_vm_ops;
-    vma->vm_start = (long unsigned int) memory_buffer;
-    vma->vm_end = (long unsigned int) memory_buffer + BUFFER_SIZE;
     
     return 0;
 }
@@ -285,7 +273,6 @@ static int mp3_cdev_release_callback(struct inode *inode, struct file *filp) {
 
 // mp1_init - Called when module is loaded
 int __init mp3_init(void) {
-    // size_t i;
     int s;
 
     #ifdef DEBUG
@@ -303,9 +290,6 @@ int __init mp3_init(void) {
 
     memory_buffer = vzalloc(BUFFER_SIZE);
     memset(memory_buffer, 0xff, BUFFER_SIZE);
-    // for(i = 0; i < BUFFER_NUM_PAGES * BUFFER_PAGE_SIZE; i += BUFFER_PAGE_SIZE) {
-    //     SetPageReserved(vmalloc_to_page(vmalloc_to_page(memory_buffer + i)));
-    // }
 
     mp3_cdev_id = MKDEV(CHR_DEV_MAJOR_DEV_NUM, CHR_DEV_MINOR_DEV_NUM);
     s = register_chrdev_region(mp3_cdev_id, CHR_DEV_COUNT, CHR_DEV_NAME);
@@ -319,8 +303,6 @@ int __init mp3_init(void) {
     s = cdev_add(&mp3_cdev, mp3_cdev_id, CHR_DEV_COUNT);
     FMT("cdev_add returned %d", s)
 
-    // s = register_chrdev(CHR_DEV_MAJOR_DEV_NUM, CHR_DEV_NAME, &mp3_cdev_fops);
-
     printk(KERN_ALERT "MP3 MODULE LOADED\n");
     return 0;
 }
@@ -329,7 +311,6 @@ int __init mp3_init(void) {
 void __exit mp3_exit(void) {
     struct mp3_pcb *entry, *tmp;
     size_t lock_flags = 0;
-    // size_t i;
 
     #ifdef DEBUG
     printk(KERN_ALERT "MP3 MODULE UNLOADING\n");
@@ -362,9 +343,6 @@ void __exit mp3_exit(void) {
 
     // Free up virtual memory space
     LOG("Free virtual memory");
-    // for(i = 0; i < BUFFER_NUM_PAGES * BUFFER_PAGE_SIZE; i += BUFFER_PAGE_SIZE) {
-    //     ClearPageReserved(vmalloc_to_page(memory_buffer + i));
-    // }
     vfree(memory_buffer);
 
     // Unregister character device

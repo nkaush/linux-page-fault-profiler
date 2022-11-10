@@ -24,7 +24,6 @@ work: work.c
 clean:
 	rm -f monitor work *~ *.ko *.o *.mod.c Module.symvers modules.order
 
-
 wipe: clean
 	find . -name "*.cmd" -delete
 	find . -name "*.mod" -delete
@@ -53,3 +52,30 @@ node:
 ex1:
 	nice ./work 1024 R 50000 & 
 	nice ./work 1024 R 10000 &
+
+ex2: 
+	nice ./work 1024 R 50000 & 
+	nice ./work 1024 L 10000 &
+
+ex3_1:
+	nice ./work 200 R 10000 &
+
+ex3_5:
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+
+ex3_11:
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
