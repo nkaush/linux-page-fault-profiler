@@ -46,3 +46,10 @@ unload:
 
 read:
 	cat /proc/mp3/status
+
+node:
+	sudo mknod node c 423 0
+
+ex1:
+	nice ./work 1024 R 50000 & 
+	nice ./work 1024 R 10000 &

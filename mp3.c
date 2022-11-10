@@ -29,8 +29,6 @@ MODULE_DESCRIPTION("CS-423 MP3");
 #define BUFFER_PAGE_SIZE 4096
 #define BUFFER_NUM_PAGES 128
 #define BUFFER_SIZE (BUFFER_PAGE_SIZE * BUFFER_NUM_PAGES)
-#define BUFFER_SAMPLE_SIZE (4 * sizeof(unsigned long))
-#define BUFFER_MAX_SAMPLES (BUFFER_SIZE / BUFFER_SAMPLE_SIZE)
 #define METRIC_COLLECTION_INTERVAL 50
 #define CHR_DEV_MAJOR_DEV_NUM 423
 #define CHR_DEV_MINOR_DEV_NUM 0
@@ -53,6 +51,16 @@ struct mp3_pcb {
     pid_t pid;
 };
 
+struct mp3_sample {
+    size_t a;
+    size_t b;
+    size_t c;
+    size_t d;
+};
+
+#define BUFFER_SAMPLE_SIZE sizeof(struct mp3_sample)
+#define BUFFER_MAX_SAMPLES (BUFFER_SIZE / BUFFER_SAMPLE_SIZE)
+
 static DEFINE_SPINLOCK(rp_lock);
 
 // This list keeps track of all the processes to schedule
@@ -64,13 +72,15 @@ static struct kmem_cache *mp3_pcb_cache;
 
 static struct cdev mp3_cdev;
 static dev_t mp3_cdev_id;
-static void *memory_buffer;
+static struct mp3_sample *memory_buffer;
 static size_t num_samples = 0;
 
+static struct page * mp3_cdev_nopage_callback(struct vm_area_struct *vma, unsigned long address, int write_access);
 static vm_fault_t mp3_cdev_fault_callback(struct vm_fault *vmf);
 
 static const struct vm_operations_struct mp3_vm_ops = { 
-    .fault = mp3_cdev_fault_callback
+    // .fault = mp3_cdev_fault_callback,
+    .nopage = mp3_cdev_nopage_callback
 };
 
 static int mp3_cdev_open_callback(struct inode *inode, struct file *file);
@@ -187,12 +197,12 @@ static ssize_t mp3_proc_write_callback(struct file *file, const char __user *buf
         if ( pcb ) {
             list_del(&pcb->list);
             --task_list_size;
-            FMT("Deregister pid %d\n", pid);
+            FMT("Deregister pid %d", pid);
             if ( task_list_size == 0 ) {
                 cancel_delayed_work_sync(&metric_collection_work);
             }
         } else {
-            FMT("Unable to deregister pid %d\n", pid);
+            FMT("Unable to deregister pid %d", pid);
         }
         spin_unlock_irqrestore(&rp_lock, lock_flags);
 
@@ -205,10 +215,9 @@ static ssize_t mp3_proc_write_callback(struct file *file, const char __user *buf
 
 static void collect_page_faults(struct work_struct* work) {
     size_t min_flt, maj_flt, utime, stime, total_min_flt, total_maj_flt, total_time;
-    size_t lock_flags = 0, sample_index = num_samples % BUFFER_MAX_SAMPLES;
-    void *sample_start_address = memory_buffer + (sample_index * BUFFER_SAMPLE_SIZE);
+    struct mp3_sample *sample = memory_buffer + num_samples;
+    size_t current_jiffies = jiffies, lock_flags = 0;
     struct mp3_pcb *pcb, *tmp;
-    size_t current_jiffies = jiffies;
 
     spin_lock_irqsave(&rp_lock, lock_flags);
     list_for_each_entry_safe(pcb, tmp, &task_list_head, list) {
@@ -223,13 +232,12 @@ static void collect_page_faults(struct work_struct* work) {
     spin_unlock_irqrestore(&rp_lock, lock_flags);
 
     // TODO write to buffer...
-    memcpy(sample_start_address, &current_jiffies, sizeof(size_t));
-    sample_start_address += sizeof(size_t);
-    memcpy(sample_start_address, &total_min_flt, sizeof(size_t));
-    sample_start_address += sizeof(size_t);
-    memcpy(sample_start_address, &total_maj_flt, sizeof(size_t));
-    sample_start_address += sizeof(size_t);
-    memcpy(sample_start_address, &total_time, sizeof(size_t));
+    sample->a = current_jiffies;
+    sample->b = total_min_flt;
+    sample->c = total_maj_flt;
+    sample->d = total_time;
+    
+    ++num_samples;
 }
 
 static vm_fault_t mp3_cdev_fault_callback(struct vm_fault *vmf) {
@@ -243,6 +251,17 @@ static vm_fault_t mp3_cdev_fault_callback(struct vm_fault *vmf) {
     ret = remap_pfn_range(vma, vma->vm_start, pfn, size, vma->vm_page_prot);
 
     return 0;
+}
+
+static struct page * mp3_cdev_nopage_callback(struct vm_area_struct *vma, unsigned long address, int write_access) {
+    struct page *pageptr;
+
+    unsigned long physaddr = address - vma->vm_start + VMA_OFFSET(vma);
+    FMT("mp3_cdev_nopage_callback: address: %zu, physaddress: %zu", address, physaddr);
+
+    pageptr = vmalloc_to_page((void*) physaddr);
+    get_page(pageptr);
+    return pageptr;
 }
 
 static int mp3_cdev_open_callback(struct inode *inode, struct file *file) {
@@ -266,7 +285,7 @@ static int mp3_cdev_release_callback(struct inode *inode, struct file *filp) {
 
 // mp1_init - Called when module is loaded
 int __init mp3_init(void) {
-    size_t i;
+    // size_t i;
     int s;
 
     #ifdef DEBUG
@@ -284,9 +303,9 @@ int __init mp3_init(void) {
 
     memory_buffer = vzalloc(BUFFER_SIZE);
     memset(memory_buffer, 0xff, BUFFER_SIZE);
-    for(i = 0; i < BUFFER_NUM_PAGES * BUFFER_PAGE_SIZE; i += BUFFER_PAGE_SIZE) {
-        SetPageReserved(vmalloc_to_page(vmalloc_to_page(memory_buffer + i)));
-    }
+    // for(i = 0; i < BUFFER_NUM_PAGES * BUFFER_PAGE_SIZE; i += BUFFER_PAGE_SIZE) {
+    //     SetPageReserved(vmalloc_to_page(vmalloc_to_page(memory_buffer + i)));
+    // }
 
     mp3_cdev_id = MKDEV(CHR_DEV_MAJOR_DEV_NUM, CHR_DEV_MINOR_DEV_NUM);
     s = register_chrdev_region(mp3_cdev_id, CHR_DEV_COUNT, CHR_DEV_NAME);
@@ -300,6 +319,8 @@ int __init mp3_init(void) {
     s = cdev_add(&mp3_cdev, mp3_cdev_id, CHR_DEV_COUNT);
     FMT("cdev_add returned %d", s)
 
+    // s = register_chrdev(CHR_DEV_MAJOR_DEV_NUM, CHR_DEV_NAME, &mp3_cdev_fops);
+
     printk(KERN_ALERT "MP3 MODULE LOADED\n");
     return 0;
 }
@@ -307,7 +328,8 @@ int __init mp3_init(void) {
 // mp1_exit - Called when module is unloaded
 void __exit mp3_exit(void) {
     struct mp3_pcb *entry, *tmp;
-    size_t lock_flags = 0, i;
+    size_t lock_flags = 0;
+    // size_t i;
 
     #ifdef DEBUG
     printk(KERN_ALERT "MP3 MODULE UNLOADING\n");
@@ -340,9 +362,9 @@ void __exit mp3_exit(void) {
 
     // Free up virtual memory space
     LOG("Free virtual memory");
-    for(i = 0; i < BUFFER_NUM_PAGES * BUFFER_PAGE_SIZE; i += BUFFER_PAGE_SIZE) {
-        ClearPageReserved(vmalloc_to_page(memory_buffer + i));
-    }
+    // for(i = 0; i < BUFFER_NUM_PAGES * BUFFER_PAGE_SIZE; i += BUFFER_PAGE_SIZE) {
+    //     ClearPageReserved(vmalloc_to_page(memory_buffer + i));
+    // }
     vfree(memory_buffer);
 
     // Unregister character device
