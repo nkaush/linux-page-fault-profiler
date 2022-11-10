@@ -197,12 +197,12 @@ static ssize_t mp3_proc_write_callback(struct file *file, const char __user *buf
             if ( task_list_size == 0 ) {
                 cancel_delayed_work_sync(&metric_collection_work);
             }
+            
+            kmem_cache_free(mp3_pcb_cache, pcb);
         } else {
             FMT("Unable to deregister pid %d", pid);
         }
         spin_unlock_irqrestore(&rp_lock, lock_flags);
-
-        kmem_cache_free(mp3_pcb_cache, pcb);
     }
 
     kfree(kernel_buf);
