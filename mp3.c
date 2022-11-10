@@ -226,9 +226,12 @@ static void collect_page_faults(struct work_struct* work) {
 
     spin_lock_irqsave(&rp_lock, lock_flags);
     list_for_each_entry_safe(pcb, tmp, &task_list_head, list) {
-        if ( get_cpu_use(pcb->pid, &min_flt, &maj_flt, &utime, &stime) == -1 ) {
-            list_del(&pcb->list);
-        } else {
+        min_flt = -1;
+        maj_flt = -1;
+        utime = -1;
+        stime = -1;
+        if ( get_cpu_use(pcb->pid, &min_flt, &maj_flt, &utime, &stime) != -1 ) {
+            // FMT("[%d] %zu, %zu, %zu, %zu", pcb->pid, min_flt, maj_flt, utime, stime);
             total_min_flt += min_flt;
             total_maj_flt += maj_flt;
             total_time += utime + stime;
