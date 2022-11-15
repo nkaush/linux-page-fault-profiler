@@ -79,3 +79,44 @@ ex3_11:
 	nice ./work 200 R 10000 &
 	nice ./work 200 R 10000 &
 	nice ./work 200 R 10000 &
+
+ex3_16:
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+
+ex3_21:
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &
+	nice ./work 200 R 10000 &

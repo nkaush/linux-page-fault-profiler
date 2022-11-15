@@ -60,6 +60,8 @@ struct mp3_sample {
 
 static DEFINE_SPINLOCK(rp_lock);
 
+static ktime_t wallclock_time;
+
 // This list keeps track of all the processes to schedule
 static struct list_head task_list_head = LIST_HEAD_INIT(task_list_head);
 static size_t task_list_size = 0;
@@ -182,7 +184,9 @@ static ssize_t mp3_proc_write_callback(struct file *file, const char __user *buf
 
         if ( task_list_size == 1 ) {
             FMT("delay is %zu jiffies", msecs_to_jiffies(METRIC_COLLECTION_INTERVAL))
+            // queue_delayed_work(workqueue, &metric_collection_work, 50);
             queue_delayed_work(workqueue, &metric_collection_work, msecs_to_jiffies(METRIC_COLLECTION_INTERVAL));
+            wallclock_time = ktime_get();
         }
         spin_unlock_irqrestore(&rp_lock, lock_flags);
     } else if ( command == 'U' ) { // TRY TO DE-REGISTER PROCESS
@@ -211,7 +215,8 @@ static ssize_t mp3_proc_write_callback(struct file *file, const char __user *buf
 
 static void collect_page_faults(struct work_struct* work) {
     size_t min_flt, maj_flt, utime, stime, total_min_flt = 0, total_maj_flt = 0, total_time = 0;
-    size_t current_jiffies = jiffies, lock_flags = 0;
+    size_t current_jiffies = jiffies, lock_flags = 0, time_usage;
+    ktime_t old_wallclock_time = wallclock_time, diff;
     struct mp3_pcb *pcb, *tmp;
     struct mp3_sample *sample;
 
@@ -239,12 +244,18 @@ static void collect_page_faults(struct work_struct* work) {
     };
     spin_unlock_irqrestore(&rp_lock, lock_flags);
 
-    FMT("%zu, %zu, %zu, %zu (num_samples %zu/%zu)", current_jiffies, total_min_flt, total_maj_flt, total_time, num_samples, BUFFER_MAX_SAMPLES);
+
+    wallclock_time = ktime_get();
+    diff = wallclock_time - old_wallclock_time;
+    time_usage = (total_time * 100ULL) / diff;
+
+    FMT("%zu, %zu, %zu, %zu (num_samples %zu/%zu)", current_jiffies, total_min_flt, total_maj_flt, time_usage, num_samples, BUFFER_MAX_SAMPLES);
     sample->data[0] = current_jiffies;
     sample->data[1] = total_min_flt;
     sample->data[2] = total_maj_flt;
-    sample->data[3] = total_time;
+    sample->data[3] = time_usage;
     
+    // queue_delayed_work(workqueue, &metric_collection_work, 50);
     queue_delayed_work(workqueue, &metric_collection_work, msecs_to_jiffies(METRIC_COLLECTION_INTERVAL));
 }
 
@@ -338,7 +349,7 @@ void __exit mp3_exit(void) {
     LOG("Removing LL nodes");
     spin_lock_irqsave(&rp_lock, lock_flags);
     list_for_each_entry_safe(entry, tmp, &task_list_head, list) {
-        FMT("removing process with pid %d\n", entry->pid);
+        FMT("removing process with pid %d", entry->pid);
         list_del(&entry->list);
         kmem_cache_free(mp3_pcb_cache, entry);
     };
