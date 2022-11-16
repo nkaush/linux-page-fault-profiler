@@ -59,13 +59,22 @@ The module uses an internal delayed workqueue to periodically collect minor and 
 
 This data was collected on a VM with 3GB RAM and 2 CPU cores. 
 
-### Case Study 1
+### Case Study 1: Thrashing and Locality
+
+This plot below combines the plots for work processes 1 & 2 and work processes 3 & 4. The individual plots are found below. 
+
+The accumulated page fault count grows steadily when the 2 work processes use random locality access (indicated by the blue plot). When one of the processes uses locality-based access, the page fault count grows fast at the start, but tapers off as the program continues running. The 2 concurrent processes with both random locality access take longer to finish than the 2 concurrent processes where 1 process uses locality-based access. 
+
+When both processes use random locality access, the CPU must continue to swap pages in and out of memory. The memory access is random, so pages used at some point in time will be eventually paged out. These pages might be requested again, so they must be paged back in at some later time. Thus, the CPU keeps consistent page fault accumulation counts throughout the runtime of the processes. 
+
+When one process uses locality-based access, the CPU does not need to continue swapping pages in and out of memory since the access is local. By the definition of locality-based access, the process will perform all accesses of a particular memory region in one particular burst of time then move to another memory region. There is not as much of a need for page swapping.
+
+![](extra/case_study_1_work_1_2_3_4.png)
 
 ![](case_study_1_work_1_2.png)
 ![](case_study_1_work_3_4.png)
-![](extra/case_study_1_work_1_2_3_4.png)
 
-### Case Study 2
+### Case Study 2: Multiprogramming
 
 Below are the plots of the CPU utilization and total time for completion for 1, 5, 11, 16, and 21 processes. There is a roughly exponential growth in CPU utilization as the number of concurrent processes increases. We observe an exponential growth since the kernel must take time to swap out pages as each process requests to access some memory. The CPU spends more overhead swapping pages in addition to handling the syscalls such for each process. There are not many swaps needed for 1, 5, and 11 processes since the memory required for these numbers of concurrent processes is below/nearing the memory limit imposed on the VM. The CPU must perform many more swaps for 16 and 21 processes since running that many passes the RAM limit imposed on the VM. 
 
