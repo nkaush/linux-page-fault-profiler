@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+import numpy as np
 
 def accumulate(l):
     out = [l[0]]
@@ -67,26 +68,46 @@ def combined(paths, procs):
 def case2(scale=False):
     pts = []
     xs = [1, 5, 11, 16, 21]
-    xaxis = [1, 2, 3, 4, 5]
+    xaxis = np.array([1, 2, 3, 4, 5])
     for N in xs:
         data_path = f'data/profile3_{N}.data'
-        _, _, _, cpu_use = read_file(data_path)
+        times, _, _, cpu_use = read_file(data_path)
 
         d = N if scale else 1
         pts.append(sum(cpu_use) / d)
 
     fig, ax = plt.subplots()
+
     ax.bar(xaxis, pts, color='r')
+    # ax.bar(xaxis, ends, color='b', label='Time Elapsed (jiffies)')
     ax.set_xticks(xaxis)
     ax.set_xticklabels(xs)
     plt.xlabel("Number of Work Processes")
     plt.ylabel("Total CPU Use")
     plt.title(f"Total CPU Use By Number of Processes")
-
     save_path = 'case_study_2_work_5.png'
     if scale:
         save_path = 'case_study_2_work_5_scaled.png'
     plt.savefig(save_path, dpi=300)
+    
+def runtime():
+    ends = []
+    xs = [1, 5, 11, 16, 21]
+    xaxis = np.array([1, 2, 3, 4, 5])
+    for N in xs:
+        data_path = f'data/profile3_{N}.data'
+        times, _, _, cpu_use = read_file(data_path)
+        ends.append(times[-1] - times[0])
+
+    fig, ax = plt.subplots()
+    ax.bar(xaxis, ends, color='r')
+    ax.set_xticks(xaxis)
+    ax.set_xticklabels(xs)
+    plt.xlabel("Number of Work Processes")
+    plt.ylabel("Total Runtime (jiffies)")
+    plt.title(f"Total Runtime By Number of Processes")
+    plt.savefig('extra/case_study_2_runtime', dpi=300)
+
 
 case1('data/profile1.data', [1, 2])
 plt.close()
@@ -96,3 +117,10 @@ case2()
 case2(scale=True)
 
 combined(['data/profile1.data', 'data/profile2.data'], [(1, 2), (3, 4)])
+runtime()
+
+# plt.close()
+# combined(
+#     [f'data/profile3_{n}.data' for n in [1, 5, 11, 16, 21]], 
+#     [(5, 5)] * 5
+# )
