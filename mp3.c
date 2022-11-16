@@ -236,14 +236,12 @@ static void collect_page_faults(struct work_struct* work) {
         utime = -1;
         stime = -1;
         if ( get_cpu_use(pcb->pid, &min_flt, &maj_flt, &utime, &stime) != -1 ) {
-            // FMT("[%d] %zu, %zu, %zu, %zu", pcb->pid, min_flt, maj_flt, utime, stime);
             total_min_flt += min_flt;
             total_maj_flt += maj_flt;
             total_time += utime + stime;
         }
     };
     spin_unlock_irqrestore(&rp_lock, lock_flags);
-
 
     wallclock_time = ktime_get();
     diff = wallclock_time - old_wallclock_time;
