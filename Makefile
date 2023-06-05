@@ -10,7 +10,7 @@ CC ?= gcc
 
 all: clean modules monitor work
 
-obj-m:= mp3.o
+obj-m:= profiler.o
 
 modules:
 	$(MAKE) -C $(KERNEL_SRC) M=$(SUBDIR) modules
@@ -38,10 +38,10 @@ slab_logs:
 	sudo cat /proc/slabinfo | head -n 10
 
 load:
-	sudo insmod mp3.ko
+	sudo insmod profiler.ko
 
 unload: 
-	sudo rmmod mp3.ko
+	sudo rmmod profiler.ko
 
 read:
 	cat /proc/mp3/status
